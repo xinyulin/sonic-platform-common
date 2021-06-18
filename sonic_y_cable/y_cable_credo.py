@@ -4,43 +4,46 @@
     Implementation of Credo Y-Cable
 """
 
+import math
+import time
+import struct
 from ctypes import c_int8
 from y_cable_base import YCableBase
 from sonic_py_common import logger
 import sonic_platform.platform
+
 
 class YCableCredo(YCableBase):
     # definitions of the offset with width accommodated for values
     # of MUX register specs of upper page 0x04 starting at 640
     # info eeprom for Y Cable
     OFFSET_IDENTFIER_LOWER_PAGE      = 0
+    OFFSET_INTERNAL_TEMPERATURE      = 22
+    OFFSET_INTERNAL_VOLTAGE          = 26
     OFFSET_IDENTFIER_UPPER_PAGE      = 128
+    OFFSET_VENDOR_NAME               = 148
+    OFFSET_PART_NUMBER               = 168
     OFFSET_DETERMINE_CABLE_READ_SIDE = 640
     OFFSET_CHECK_LINK_ACTIVE         = 641
     OFFSET_SWITCH_MUX_DIRECTION      = 642
     OFFSET_MUX_DIRECTION             = 644
     OFFSET_ACTIVE_TOR_INDICATOR      = 645
-    OFFSET_CONFIGURE_PRBS_TYPE       = 768
-    OFFSET_ENABLE_PRBS               = 769
-    OFFSET_INITIATE_BER_MEASUREMENT  = 770
-    OFFSET_TARGET                    = 794
-    OFFSET_ENABLE_LOOPBACK           = 793
-    OFFSET_LANE_1_BER_RESULT         = 771
-    OFFSET_MAX_LANES                 = 2
-    OFFSET_INITIATE_EYE_MEASUREMENT  = 784
-    OFFSET_LANE_1_EYE_RESULT         = 785
-    OFFSET_PART_NUMBER               = 168
-    OFFSET_VENDOR_NAME               = 148
     OFFSET_MANUAL_SWITCH_COUNT       = 653
     OFFSET_AUTO_SWITCH_COUNT         = 657
     OFFSET_NIC_CURSOR_VALUES         = 661
     OFFSET_TOR1_CURSOR_VALUES        = 681
     OFFSET_TOR2_CURSOR_VALUES        = 701
     OFFSET_NIC_LANE_ACTIVE           = 721
-    OFFSET_INTERNAL_TEMPERATURE      = 22
-    OFFSET_INTERNAL_VOLTAGE          = 26
     OFFSET_NIC_TEMPERATURE           = 727
     OFFSET_NIC_VOLTAGE               = 729
+    OFFSET_CONFIGURE_PRBS_TYPE       = 768
+    OFFSET_ENABLE_PRBS               = 769
+    OFFSET_INITIATE_BER_MEASUREMENT  = 770
+    OFFSET_LANE_1_BER_RESULT         = 771
+    OFFSET_INITIATE_EYE_MEASUREMENT  = 784
+    OFFSET_LANE_1_EYE_RESULT         = 785
+    OFFSET_TARGET                    = 794
+    OFFSET_ENABLE_LOOPBACK           = 793
 
     # definition of VSC command byte
     VSC_BYTE_OPCODE                  = 128
@@ -76,6 +79,10 @@ class YCableCredo(YCableBase):
 
     BLOCK_WRITE_LENGTH               = 32
 
+    FIRMWARE_INFO_PAYLOAD_SIZE       = 48
+
+    MAX_NUM_LANES                    = 4
+
     # definition of MIS memorymap page
     MIS_PAGE_VSC                     = 0xFA
     MIS_PAGE_FC                      = 0xFC
@@ -87,16 +94,9 @@ class YCableCredo(YCableBase):
     # VSC opcode
     VSC_OPCODE_FWUPD                 = 0x80
     VSC_OPCODE_EVENTLOG              = 0x81
+    BER_TIMEOUT_SECS                 = 1
+    EYE_TIMEOUT_SECS                 = 1
 
-    # Valid return codes for upgrade firmware routine steps
-    FIRMWARE_DOWNLOAD_SUCCESS        = 0
-    FIRMWARE_DOWNLOAD_FAILURE        = 1
-    FIRMWARE_ACTIVATE_SUCCESS        = 0
-    FIRMWARE_ACTIVATE_FAILURE        = 1
-    FIRMWARE_ROLLBACK_SUCCESS        = 0
-    FIRMWARE_ROLLBACK_FAILURE        = 1
-    FIRMWARE_SYNCHRONIZE_SUCCESS     = 0
-    FIRMWARE_SYNCHRONIZE_FAILURE     = 1
 
     # MCU error code
     MCU_EC_NO_ERROR                         = 0
@@ -141,6 +141,8 @@ class YCableCredo(YCableBase):
         MCU_EC_UNDEFINED_ERROR                 :'Undefined Error',
     }
 
+    SYSLOG_IDENTIFIER = "sonic_y_cable"
+
     def __init__(self, port):
         """
         Args:
@@ -149,7 +151,7 @@ class YCableCredo(YCableBase):
         """
         YCableBase.__init__(self, port)
 
-        self.helper_logger = logger.Logger(SYSLOG_IDENTIFIER)
+        self.helper_logger = logger.Logger(YCableCredo.SYSLOG_IDENTIFIER)
         self.platform_chassis = None
 
         try:
@@ -157,6 +159,120 @@ class YCableCredo(YCableBase):
             self.helper_logger.log_info("chassis loaded {}".format(platform_chassis))
         except Exception as e:
             self.helper_logger.log_warning("Failed to load chassis due to {}".format(repr(e)))
+
+    def read_mmap(self, page, byte, len = 1):
+        """
+        This API specifically converts memory map page and offset to linar address, then returns eeprom values
+        by calling read_eeprom()
+
+        Args:
+             page:
+                 an Integer, page number of memorymap
+
+             byte:
+                 an Integer, byte address of the page
+
+             len:
+                 an Integer, length of the reading
+
+        Returns:
+            an Integer or bytearray, returns the value of the specified eeprom addres, returns 0xFF if it did not succeed
+        """
+        if byte < 128:
+            linear_addr = byte
+        else:
+            linear_addr = page * 128 + byte
+
+        ret = self.platform_chassis.get_sfp(self.port).read_eeprom(linear_addr, len)
+
+        if ret == None:
+            self.helper_logger.log_error('Read Nack!  page:%2X byte:%2X' % (page, byte))
+            return 0xFF
+        else:
+            if len == 1:
+                try:
+                    return ret[0]
+                except:
+                    self.helper_logger.log_error('Unknown read_mmap error')
+                    return 0xFF
+            else:
+                return ret
+
+    def write_mmap(self, page, byte, value, len = 1):
+        """
+        This API specifically converts memory map page and offset to linar address for calling write_eeprom()
+
+        Args:
+             page:
+                 an Integer, page number of memorymap
+
+             byte:
+                 an Integer, byte address of the page
+
+             value:
+                 an Integer or bytearray, value to be written to the address
+
+             len:
+                 an Integer, length to be written
+
+        Returns:
+            an Boolean, true if succeeded and false if it did not succeed.
+        """
+
+        #print ('write page:%02X byte :%02X len:%d type:%s' % (page, byte, len, type(value)))
+
+        if byte < 128:
+            linear_addr = byte
+        else:
+            linear_addr = page * 128 + byte
+
+        if len == 1:
+            ba = bytearray([value])
+        else:
+            ba = value
+
+        ret = self.platform_chassis.get_sfp(self.port).write_eeprom(linear_addr, len, ba)
+
+        if (ret == False):
+            self.helper_logger.log_error('Write Failed!  page:%2X byte:%2X value:%2X' % (page, byte, value))
+
+        return ret
+
+    def send_vsc_cmd(self, vsc_req_form, timeout = 1200):
+        """
+        This routine sends the vsc payload to MCU and returns the status code
+
+        Args:
+             vsc_req_form:
+                 a bytearray, command request form follow by vsc command structure
+
+             timeout:
+                 an Integer, number of 5ms delay time, default value is 1200 (6 seconds).
+
+        Returns:
+            an Integer, status code of vsc command, find the 'MCU_ERROR_CODE_STRING' for the interpretation.
+        """
+
+        for idx in range(129, YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH):
+            if vsc_req_form[idx] != None:
+                self.write_mmap(YCableCredo.MIS_PAGE_VSC, idx, vsc_req_form[idx])
+        self.write_mmap(YCableCredo.MIS_PAGE_VSC, YCableCredo.VSC_BYTE_OPCODE, vsc_req_form[YCableCredo.VSC_BYTE_OPCODE])
+
+        while True:
+            done = self.read_mmap(YCableCredo.MIS_PAGE_VSC, YCableCredo.VSC_BYTE_OPCODE)
+            if done == 0:
+                break
+
+            time.sleep(0.005)
+            timeout -= 1
+
+            if timeout == 0:
+                self.helper_logger.log_error("wait vsc status value timeout")
+                return YCableCredo.MCU_EC_WAIT_VSC_STATUS_TIMEOUT
+
+        status = self.read_mmap(YCableCredo.MIS_PAGE_VSC, YCableCredo.VSC_BYTE_STATUS)
+
+        return status
 
     def toggle_mux_to_tor_a(self):
         """
@@ -203,7 +319,7 @@ class YCableCredo(YCableBase):
         curr_offset = YCableCredo.OFFSET_SWITCH_MUX_DIRECTION
 
         if self.platform_chassis is not None:
-            result = platform_chassis.get_sfp(self.port).write_eeprom(curr_offset, 1, buffer)
+            result = self.platform_chassis.get_sfp(self.port).write_eeprom(curr_offset, 1, buffer)
         else:
             self.helper_logger.log_error("platform_chassis is not loaded, failed to toggle mux to TOR B")
             return False
@@ -229,7 +345,7 @@ class YCableCredo(YCableBase):
         curr_offset = YCableCredo.OFFSET_DETERMINE_CABLE_READ_SIDE
 
         if self.platform_chassis is not None:
-            result = platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
+            result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
         else:
             self.helper_logger.log_error("platform_chassis is not loaded, failed to check read side")
             return YCableBase.TARGET_UNKNOWN
@@ -238,11 +354,11 @@ class YCableCredo(YCableBase):
             if isinstance(result, bytearray):
                 if len(result) != 1:
                     self.helper_logger.log_error("Error: for checking mux_cable read side, eeprom read returned a size {} not equal to 1 for port {}".format(
-                        len(result), physical_port))
+                        len(result), self.port))
                     return YCableBase.TARGET_UNKNOWN
             else:
                 self.helper_logger.log_error("Error: for checking mux_cable read_side, eeprom read returned an instance value of type {} which is not a bytearray for port {}".format(
-                    type(result), physical_port))
+                    type(result), self.port))
                 return YCableBase.TARGET_UNKNOWN
         else:
             self.helper_logger.log_error(
@@ -282,7 +398,7 @@ class YCableCredo(YCableBase):
                 TARGET_UNKNOWN, if mux direction API fails.
         """
 
-        curr_offset = YCableBase.OFFSET_MUX_DIRECTION
+        curr_offset = YCableCredo.OFFSET_MUX_DIRECTION
 
         if self.platform_chassis is not None:
             result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
@@ -294,25 +410,25 @@ class YCableCredo(YCableBase):
             if isinstance(result, bytearray):
                 if len(result) != 1:
                     self.helper_logger.log_error("Error: for checking mux_cable mux pointing side, eeprom read returned a size {} not equal to 1 for port {}".format(
-                        len(result), physical_port))
+                        len(result), self.port))
                     return YCableBase.TARGET_UNKNOWN
             else:
                 self.helper_logger.log_error("Error: for checking mux_cable mux pointing side, eeprom read returned an instance value of type {} which is not a bytearray for port {}".format(
-                    type(result), physical_port))
+                    type(result), self.port))
                 return YCableBase.TARGET_UNKNOWN
         else:
             self.helper_logger.log_error(
-                "Error: for checking mux_cable mux pointing side, eeprom read returned a None value from eeprom read for port {} which is not expected".format(physical_port))
+                "Error: for checking mux_cable mux pointing side, eeprom read returned a None value from eeprom read for port {} which is not expected".format(self.port))
             return YCableBase.TARGET_UNKNOWN
 
         regval_read = struct.unpack(">B", result)
 
         if ((regval_read[0]) & 0x01):
             self.helper_logger.log_info("mux pointing to TOR A")
-            return YCableBase.TARGET_TOR1
+            return YCableBase.TARGET_TOR_A
         elif regval_read[0] == 0:
             self.helper_logger.log_info("mux pointing to TOR B")
-            return YCableBase.TARGET_TOR2
+            return YCableBase.TARGET_TOR_B
         else:
             self.helper_logger.log_error(
                 "Error: unknown status for mux direction regval = {} ".format(result))
@@ -337,8 +453,47 @@ class YCableCredo(YCableBase):
                 TARGET_TOR_B, if TOR B is actively linked and sending traffic.
                 TARGET_UNKNOWN, if checking which side is linked and sending traffic API fails.
         """
+        curr_offset = YCableCredo.OFFSET_ACTIVE_TOR_INDICATOR
 
-        raise NotImplementedError
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(
+                self.port).read_eeprom(curr_offset, 1)
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to check Active Linked and routing TOR side")
+            return YCableBase.TARGET_UNKNOWN
+
+        if result is not None:
+            if isinstance(result, bytearray):
+                if len(result) != 1:
+                    self.helper_logger.log_error("Error: for checking mux_cable active linked side, eeprom read returned a size {} not equal to 1 for port {}".format(
+                        len(result), self.port))
+                    return YCableBase.TARGET_UNKNOWN
+            else:
+                self.helper_logger.log_error("Error: for checking mux_cable active linked side, eeprom read returned an instance value of type {} which is not a bytearray for port {}".format(
+                    type(result), self.port))
+                return YCableBase.TARGET_UNKNOWN
+        else:
+            self.helper_logger.log_error(
+                "Error: for checking mux_cable active linked side, eeprom read returned a None value from eeprom read for port {} which is not expected".format(self.port))
+            return YCableBase.TARGET_UNKNOWN
+
+        regval_read = struct.unpack(">B", result)
+
+        if ((regval_read[0] >> 1) & 0x01):
+            self.helper_logger.log_info("TOR B active linked and actively routing")
+            return YCableBase.TARGET_TOR_B
+        elif ((regval_read[0]) & 0x01):
+            self.helper_logger.log_info("TOR A standby linked and actively routing")
+            return YCableBase.TARGET_TOR_A
+        elif regval_read[0] == 0:
+            self.helper_logger.log_info("Nothing linked for routing")
+            return YCableBase.TARGET_NIC
+        else:
+            self.helper_logger.log_error(
+                "Error: unknown status for active TOR regval = {} ".format(result))
+            return YCableBase.TARGET_UNKNOWN
+
+        return YCableBase.TARGET_UNKNOWN
 
     def is_link_active(self, target):
         """
@@ -357,8 +512,43 @@ class YCableCredo(YCableBase):
             a boolean, True if the link is active
                      , False if the link is not active
         """
+        curr_offset = YCableCredo.OFFSET_CHECK_LINK_ACTIVE
 
-        raise NotImplementedError
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(
+                self.port).read_eeprom(curr_offset, 1)
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to check if link is Active on target side")
+            return YCableBase.TARGET_UNKNOWN
+
+        if result is not None:
+            if isinstance(result, bytearray):
+                if len(result) != 1:
+                    self.helper_logger.log_error("Error: for checking mux_cable link is active on target side, eeprom read returned a size {} not equal to 1 for port {}".format(
+                        len(result), self.port))
+                    return YCableBase.TARGET_UNKNOWN
+            else:
+                self.helper_logger.log_error("Error: for checking mux_cable link is active on target side, eeprom read returned an instance value of type {} which is not a bytearray for port {}".format(
+                    type(result), self.port))
+                return YCableBase.TARGET_UNKNOWN
+        else:
+            self.helper_logger.log_error(
+                "Error: for checking mux_cable link is active on target side, eeprom read returned a None value from eeprom read for port {} which is not expected".format(self.port))
+            return YCableBase.TARGET_UNKNOWN
+
+        regval_read = struct.unpack(">B", result)
+
+        if (regval_read[0] & 0x01):
+            self.helper_logger.log_info("NIC link is up")
+            return True
+        elif ((regval_read[0] >> 2) & 0x01):
+            self.helper_logger.log_info("TOR A link is up")
+            return True
+        elif ((regval_read[0] >> 1) & 0x01):
+            self.helper_logger.log_info("TOR B link is up")
+            return True
+        else:
+            return YCableBase.TARGET_UNKNOWN
 
     def get_eye_heights(self, target):
         """
@@ -377,8 +567,48 @@ class YCableCredo(YCableBase):
             a list, with EYE values of lane 0 lane 1 lane 2 lane 3 with corresponding index
         """
 
-        raise NotImplementedError
+        buffer = bytearray([target])
+        curr_offset = YCableCredo.OFFSET_TARGET
 
+        eye_result = []
+
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+            if result is False:
+                return result
+            buffer = bytearray([0])
+            curr_offset = YCableCredo.OFFSET_INITIATE_EYE_MEASUREMENT
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+            if result is False:
+                return result
+
+            time_start = time.time()
+            while(True):
+                done = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
+
+                time_now = time.time()
+                time_diff = time_now - time_start
+                if done[0] == 1:
+                    break
+                elif time_diff >= YCableCredo.EYE_TIMEOUT_SECS:
+                    return YCableCredo.EEPROM_TIMEOUT_ERROR
+
+            idx = 0
+            for lane in range(YCableCredo.MAX_NUM_LANES):
+                curr_offset = YCableCredo.OFFSET_LANE_1_EYE_RESULT
+                msb_result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset+idx, 1)
+                lsb_result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset+1+idx, 1)
+
+                lane_result = (msb_result[0] << 8 | lsb_result[0])
+                eye_result.append(lane_result)
+                idx += 2
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to configure the PRBS type")
+            return YCableCredo.EEPROM_ERROR
+
+        return eye_result
 
     def get_vendor(self):
         """
@@ -390,8 +620,17 @@ class YCableCredo(YCableBase):
         Returns:
             a string, with vendor name
         """
+        curr_offset = YCableCredo.OFFSET_VENDOR_NAME
 
-        raise NotImplementedError
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 16)
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get Vendor name")
+            return -1
+
+        vendor_name = str(result.decode())
+
+        return vendor_name
 
     def get_part_number(self):
         """
@@ -403,8 +642,17 @@ class YCableCredo(YCableBase):
         Returns:
             a string, with part number
         """
+        curr_offset = YCableCredo.OFFSET_PART_NUMBER
 
-        raise NotImplementedError
+        if self.platform_chassis is not None:
+            part_result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 16)
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get part number")
+            return -1
+
+        part_number = str(part_result.decode())
+
+        return part_number
 
     def get_switch_count_total(self, switch_count_type, clear_on_read=False):
         """
@@ -423,8 +671,27 @@ class YCableCredo(YCableBase):
             Returns:
                 an integer, the number of times the Y-cable has been switched
         """
+        if switch_count_type == YCableBase.SWITCH_COUNT_MANUAL:
+            curr_offset = YCableCredo.OFFSET_MANUAL_SWITCH_COUNT
+        elif switch_count_type == YCableBase.SWITCH_COUNT_AUTO:
+            curr_offset = YCableCredo.OFFSET_AUTO_SWITCH_COUNT
+        else:
+            self.helper_logger.log_error("not a valid switch_count_type, failed to get switch count")
+            return -1
 
-        raise NotImplementedError
+        count = 0
+
+        if self.platform_chassis is not None:
+            msb_result   = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
+            msb_result_1 = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset + 1, 1)
+            msb_result_2 = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset + 2, 1)
+            lsb_result   = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset+3, 1)
+            count        = (msb_result[0] << 24 | msb_result_1[0] << 16 | msb_result_2[0] << 8 | lsb_result[0])
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get manual switch count")
+            return -1
+
+        return count
 
     def get_switch_count_tor_a(self, clear_on_read=False):
         """
@@ -512,8 +779,26 @@ class YCableCredo(YCableBase):
         Returns:
             a list, with  pre one, pre two, main, post one, post two, post three cursor values in the order
         """
+        curr_offset = YCableCredo.OFFSET_NIC_CURSOR_VALUES
 
-        raise NotImplementedError
+        result = []
+
+        if self.platform_chassis is not None:
+            pre1  = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset + (target)*20 + (lane-1)*5, 1)
+            result.append(c_int8(pre1[0]).value)
+            pre2  = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset + (target)*20 + (lane-1)*5 + 1, 1)
+            result.append(c_int8(pre2[0]).value)
+            main  = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset + (target)*20 + (lane-1)*5 + 2, 1)
+            result.append(c_int8(main[0]).value)
+            post1 = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset + (target)*20 + (lane-1)*5 + 3, 1)
+            result.append(c_int8(post1[0]).value)
+            post2 = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset + (target)*20 + (lane-1)*5 + 4, 1)
+            result.append(c_int8(post2[0]).value)
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get target cursor values")
+            return -1
+
+        return result
 
     def set_target_cursor_values(self, lane, cursor_values, target):
         """
@@ -561,8 +846,56 @@ class YCableCredo(YCableBase):
                  and their corresponding values
 
         """
+        vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
+        vsc_req_form[YCableCredo.VSC_BYTE_OPCODE] = YCableCredo.VSC_OPCODE_FWUPD
+        vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_GET_INFO
+        status = self.send_vsc_cmd(vsc_req_form)
 
-        raise NotImplementedError
+        data = bytearray(YCableCredo.FIRMWARE_INFO_PAYLOAD_SIZE)
+
+        if self.platform_chassis is not None:
+            for byte_idx in range(0, YCableCredo.FIRMWARE_INFO_PAYLOAD_SIZE):
+                curr_offset = 0xfc * 128 + 128 + byte_idx
+                read_out = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
+                data[byte_idx] = read_out[0]
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get NIC lanes active")
+            return -1
+
+        result = {}
+        NUM_MCU_SIDE = 3
+
+        base_addr           = int(target * (YCableCredo.FIRMWARE_INFO_PAYLOAD_SIZE / NUM_MCU_SIDE))
+        rev_major_slot1     = struct.unpack_from('<B', data[(0 + base_addr):(1 + base_addr)])[0]
+        rev_minor_slot1     = struct.unpack_from('<B', data[(2 + base_addr):(3 + base_addr)])[0]
+        rev_build_lsb_slot1 = struct.unpack_from('<B', data[(4 + base_addr):(5 + base_addr)])[0]
+        rev_build_msb_slot1 = struct.unpack_from('<B', data[(5 + base_addr):(6 + base_addr)])[0]
+        rev_major_slot2     = struct.unpack_from('<B', data[(1 + base_addr):(2 + base_addr)])[0]
+        rev_minor_slot2     = struct.unpack_from('<B', data[(3 + base_addr):(4 + base_addr)])[0]
+        rev_build_lsb_slot2 = struct.unpack_from('<B', data[(6 + base_addr):(7 + base_addr)])[0]
+        rev_build_msb_slot2 = struct.unpack_from('<B', data[(7 + base_addr):(8 + base_addr)])[0]
+        slot_status         = struct.unpack_from('<B', data[(8 + base_addr):(9 + base_addr)])[0]
+
+        if (rev_major_slot1 == 0 and rev_minor_slot1 == 0 and rev_build_lsb_slot1 == 0 and rev_build_msb_slot1 == 0 and rev_major_slot2 == 0 and rev_minor_slot2 == 0 and rev_build_lsb_slot2 == 0 and rev_build_msb_slot2 == 0):
+            return None
+        else:
+            build_slot1   = chr(rev_build_lsb_slot1) + chr(rev_build_msb_slot1)
+            version_slot1 = str(rev_major_slot1) + "." + str(rev_minor_slot1)
+            build_slot2   = chr(rev_build_lsb_slot2) + chr(rev_build_msb_slot2)
+            version_slot2 = str(rev_major_slot2) + "." + str(rev_minor_slot2)
+
+            result["build_slot1"]   = build_slot1
+            result["version_slot1"] = version_slot1
+            result["build_slot2"]   = build_slot2
+            result["version_slot2"] = version_slot2
+            result["run_slot1"]     = True if slot_status & 0x01 else False
+            result["run_slot2"]     = True if slot_status & 0x10 else False
+            result["commit_slot1"]  = True if slot_status & 0x02 else False
+            result["commit_slot2"]  = True if slot_status & 0x20 else False
+            result["empty_slot1"]   = True if slot_status & 0x04 else False
+            result["empty_slot2"]   = True if slot_status & 0x40 else False
+
+        return result
 
     def download_firmware(self, fwfile):
         """
@@ -593,7 +926,117 @@ class YCableCredo(YCableBase):
                 or an error code as to what was the cause of firmware download failure
         """
 
-        raise NotImplementedError
+        inFile = open(fwfile, 'rb')
+        fwImage = bytearray(inFile.read())
+        inFile.close()
+
+        '''
+        Firmware update start
+        '''
+        vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
+        vsc_req_form[YCableCredo.VSC_BYTE_OPCODE] = YCableCredo.VSC_OPCODE_FWUPD
+        vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_START
+        status = self.send_vsc_cmd(vsc_req_form)
+        if status != MCU_EC_NO_ERROR:
+            self.helper_logger.log_error(YCableCredo.MCU_ERROR_CODE_STRING[status])
+            return YCableBase.FIRMWARE_DOWNLOAD_FAILURE
+
+        '''
+        Transfer firmwre image to local side MCU
+        '''
+        total_chunk = len(fwImage) // YCableCredo.VSC_BUFF_SIZE
+        chunk_idx = 0
+        retry_count = 0
+        while chunk_idx < total_chunk:
+            checksum = 0
+            fw_img_offset = chunk_idx * YCableCredo.VSC_BUFF_SIZE
+            for byte_offset in range(YCableCredo.VSC_BUFF_SIZE):
+                checksum += fwImage[fw_img_offset]
+                fw_img_offset += 1
+                if (((byte_offset + 1) % YCableCredo.BLOCK_WRITE_LENGTH) == 0):
+                    page = MIS_PAGE_FC + byte_offset // 128
+                    byte = 128 + ((byte_offset + 1) - YCableCredo.BLOCK_WRITE_LENGTH) % 128
+                    self.write_mmap(page, byte, bytearray(fwImage[fw_img_offset - BLOCK_WRITE_LENGTH: fw_img_offset]), BLOCK_WRITE_LENGTH)
+
+            fw_img_offset = chunk_idx * YCableCredo.VSC_BUFF_SIZE
+            vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
+            vsc_req_form[YCableCredo.VSC_BYTE_OPCODE]     = YCableCredo.VSC_OPCODE_FWUPD
+            vsc_req_form[YCableCredo.VSC_BYTE_OPTION]     = YCableCredo.FWUPD_OPTION_LOCAL_XFER
+            vsc_req_form[YCableCredo.VSC_BYTE_ADDR0]      = (fw_img_offset >> 0) & 0xFF
+            vsc_req_form[YCableCredo.VSC_BYTE_ADDR1]      = (fw_img_offset >> 8) & 0xFF
+            vsc_req_form[YCableCredo.VSC_BYTE_ADDR2]      = (fw_img_offset >> 16) & 0xFF
+            vsc_req_form[YCableCredo.VSC_BYTE_ADDR3]      = (fw_img_offset >> 24) & 0xFF
+            vsc_req_form[YCableCredo.VSC_BYTE_CHKSUM_MSB] = (checksum >> 8) & 0xFF
+            vsc_req_form[YCableCredo.VSC_BYTE_CHKSUM_LSB] = (checksum >> 0) & 0xFF
+            status = self.send_vsc_cmd(vsc_req_form)
+
+            sys.stdout.write('\rI2C Xfer Offset [%06X] %d%% ' % (fw_img_offset, (100 * chunk_idx / (total_chunk - 1))))
+            sys.stdout.flush()
+
+            if status == YCableCredo.MCU_EC_NO_ERROR:
+                chunk_idx += 1
+                retry_count = 0
+            else:
+                print ('MCU Checksum error[%04X], resend firmware payload [%04X: %04X]' % (status, chunk_idx * VSC_BUFF_SIZE, (chunk_idx + 1) * VSC_BUFF_SIZE))
+
+                if retry_count == 3:
+                    self.helper_logger.log_error ('Retry Xfer Fw Bin Error, abort firmware update')
+                    return YCableBase.FIRMWARE_DOWNLOAD_FAILURE
+                retry_count += 1
+
+        '''
+        Complete the local side firmware transferring
+        '''
+        vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
+        vsc_req_form[YCableCredo.VSC_BYTE_OPCODE] = YCableCredo.VSC_OPCODE_FWUPD
+        vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_LOCAL_XFER_COMPLETE
+        status = self.send_vsc_cmd(vsc_req_form)
+        if status != YCableCredo.MCU_EC_NO_ERROR:
+            helper_logger.log_error(YCableCredo.MCU_ERROR_CODE_STRING[status])
+            return YCableBase.FIRMWARE_DOWNLOAD_FAILURE
+
+        '''
+        transfer firmware image from local side MCU to the other two via UART
+        '''
+        vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
+        vsc_req_form[YCableCredo.VSC_BYTE_OPCODE] = YCableCredo.VSC_OPCODE_FWUPD
+        vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_UART_XFER
+        status = self.send_vsc_cmd(vsc_req_form)
+        if status != YCableCredo.MCU_EC_NO_ERROR:
+            self.helper_logger.log_error(YCableCredo.MCU_ERROR_CODE_STRING[status])
+            return YCableBase.FIRMWARE_DOWNLOAD_FAILURE
+
+        vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
+        vsc_req_form[YCableCredo.VSC_BYTE_OPCODE] = YCableCredo.VSC_OPCODE_FWUPD
+        vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_UART_XFER_STATUS
+        status = self.send_vsc_cmd(vsc_req_form)
+        if status != YCableCredo.MCU_EC_NO_ERROR:
+            return YCableBase.FIRMWARE_DOWNLOAD_FAILURE
+
+        busy        = self.read_mmap(YCableCredo.MIS_PAGE_FC, 128)
+        percentNIC  = self.read_mmap(YCableCredo.MIS_PAGE_FC, 129)
+        percentTOR1 = self.read_mmap(YCableCredo.MIS_PAGE_FC, 130)
+        percentTOR2 = self.read_mmap(YCableCredo.MIS_PAGE_FC, 131)
+
+        while busy != 0:
+            vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
+            vsc_req_form[YCableCredo.VSC_BYTE_OPCODE] = YCableCredo.VSC_OPCODE_FWUPD
+            vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_UART_XFER_STATUS
+            status = self.send_vsc_cmd(vsc_req_form)
+            if status != YCableCredo.MCU_EC_NO_ERROR:
+                print ('\nUart Error Status|%04X' % status)
+                return status
+            time.sleep(0.2)
+            busy        = self.read_mmap(YCableCredo.MIS_PAGE_FC, 128)
+            percentNIC  = self.read_mmap(YCableCredo.MIS_PAGE_FC, 129)
+            percentTOR1 = self.read_mmap(YCableCredo.MIS_PAGE_FC, 130)
+            percentTOR2 = self.read_mmap(YCableCredo.MIS_PAGE_FC, 131)
+
+            sys.stdout.write('\rUART Xfer: NIC [%03d%%] TOR1 [%03d%%] TOR2 [%03d%%]' % (percentNIC, percentTOR1, percentTOR2))
+            sys.stdout.flush()
+        print('')
+
+        return YCableBase.FIRMWARE_DOWNLOAD_SUCCESS
 
     def activate_firmware(self, fwfile=None, hitless=False):
         """
@@ -632,8 +1075,29 @@ class YCableCredo(YCableBase):
                 FIRMWARE_ACTIVATE_SUCCESS
                 FIRMWARE_ACTIVATE_FAILURE
         """
+        side = 0x7
 
-        raise NotImplementedError
+        vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
+        vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_COMMIT
+        vsc_req_form[YCableCredo.VSC_BYTE_OPCODE] = YCableCredo.VSC_OPCODE_FWUPD
+        vsc_req_form[YCableCredo.VSC_BYTE_ADDR0]  = side
+        status = self.send_vsc_cmd(vsc_req_form)
+        if status != YCableCredo.MCU_EC_NO_ERROR:
+            self.helper_logger.log_error(YCableCredo.MCU_ERROR_CODE_STRING[status])
+            return YCableBase.FIRMWARE_ACTIVATE_FAILURE
+
+        vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
+        vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_RUN
+        vsc_req_form[YCableCredo.VSC_BYTE_OPCODE] = YCableCredo.VSC_OPCODE_FWUPD
+        vsc_req_form[YCableCredo.VSC_BYTE_ADDR0]  = side
+        vsc_req_form[YCableCredo.VSC_BYTE_ADDR1]  = hitless
+        status = self.send_vsc_cmd(vsc_req_form)
+        time.sleep(5)
+        if status != YCableCredo.MCU_EC_NO_ERROR:
+            self.helper_logger.log_error(YCableCredo.MCU_ERROR_CODE_STRING[status])
+            return YCableBase.FIRMWARE_ACTIVATE_FAILURE
+
+        return YCableBase.FIRMWARE_ACTIVATE_SUCCESS
 
     def rollback_firmware(self, fwfile=None):
         """
@@ -663,8 +1127,9 @@ class YCableCredo(YCableBase):
                 FIRMWARE_ROLLBACK_SUCCESS
                 FIRMWARE_ROLLBACK_FAILURE
         """
+        self.activate_firmware()
 
-        raise NotImplementedError
+        return YCableBase.FIRMWARE_ROLLBACK_SUCCESS
 
     def set_switching_mode(self, mode):
         """
@@ -687,7 +1152,25 @@ class YCableCredo(YCableBase):
             a Boolean, True if the switch succeeded and False if it did not succeed.
         """
 
-        raise NotImplementedError
+        if mode == YCableBase.SWITCHING_MODE_AUTO:
+            buffer = bytearray([1])
+        elif mode == YCableBase.SWITCHING_MODE_MANUAL:
+            buffer = bytearray([0])
+        else:
+            self.helper_logger.log_error(
+                "ERR: invalid mode provided for autoswitch feature, failed to do a switch")
+            return False
+
+        curr_offset = YCableCredo.OFFSET_ENABLE_AUTO_SWITCH
+
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to do a switch target")
+            return False
+
+        return result
 
     def get_switching_mode(self):
         """
@@ -701,8 +1184,19 @@ class YCableCredo(YCableBase):
                SWITCHING_MODE_AUTO if auto switch is enabled.
                SWITCHING_MODE_MANUAL if manual switch is enabled.
         """
+        curr_offset = YCableCredo.OFFSET_ENABLE_AUTO_SWITCH
 
-        raise NotImplementedError
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(
+                self.port).read_eeprom(curr_offset, 1)
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get the switch mode")
+            return -1
+
+        if result[0] == 1:
+            return YCableBase.SWITCHING_MODE_AUTO
+        else:
+            return YCableBase.SWITCHING_MODE_MANUAL
 
     def get_nic_temperature(self):
         """
@@ -715,7 +1209,15 @@ class YCableCredo(YCableBase):
             an Integer, the temperature of the NIC MCU
         """
 
-        raise NotImplementedError
+        curr_offset = YCableCredo.OFFSET_NIC_TEMPERATURE
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
+            temp = result[0]
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get NIC temp")
+            return -1
+
+        return temp
 
     def get_local_temperature(self):
         """
@@ -728,7 +1230,15 @@ class YCableCredo(YCableBase):
             an Integer, the temperature of the local MCU
         """
 
-        raise NotImplementedError
+        curr_offset = YCableCredo.OFFSET_INTERNAL_TEMPERATURE
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
+            temp = result[0]
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get local temp")
+            return -1
+
+        return temp
 
     def get_nic_voltage(self):
         """
@@ -741,7 +1251,16 @@ class YCableCredo(YCableBase):
             a float, the voltage of the NIC MCU
         """
 
-        raise NotImplementedError
+        if self.platform_chassis is not None:
+            curr_offset = YCableCredo.OFFSET_NIC_VOLTAGE
+            msb_result  = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
+            lsb_result  = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset+1, 1)
+            voltage     = (((msb_result[0] << 8) | lsb_result[0]) * 0.0001)
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get NIC voltage")
+            return -1
+
+        return voltage
 
     def get_local_voltage(self):
         """
@@ -754,7 +1273,16 @@ class YCableCredo(YCableBase):
             a float, the voltage of the local MCU
         """
 
-        raise NotImplementedError
+        if self.platform_chassis is not None:
+            curr_offset = YCableCredo.OFFSET_INTERNAL_VOLTAGE
+            msb_result  = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
+            lsb_result  = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset+1, 1)
+            voltage     = (((msb_result[0] << 8) | lsb_result[0]) * 0.0001)
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get local voltage")
+            return -1
+
+        return voltage
 
     def get_alive_status(self):
         """
@@ -790,8 +1318,8 @@ class YCableCredo(YCableBase):
 
         raise NotImplementedError
 
-    def create_port(self, speed, fec_mode_tor_a=FEC_MODE_NONE, fec_mode_tor_b=FEC_MODE_NONE,
-                    fec_mode_nic=FEC_MODE_NONE, anlt_tor_a=False, anlt_tor_b= False, anlt_nic=False):
+    def create_port(self, speed, fec_mode_tor_a=0, fec_mode_tor_b=0,
+                    fec_mode_nic=0, anlt_tor_a=False, anlt_tor_b= False, anlt_nic=False):
         """
         This API sets the mode of the cable/port for corresponding lane/FEC etc. configuration as specified.
         The speed specifies which mode is supposed to be set 50G, 100G etc
@@ -1122,7 +1650,7 @@ class YCableCredo(YCableBase):
 
         raise NotImplementedError
 
-    def enable_prbs_mode(self, target, mode_value, lane_mask, direction=PRBS_DIRECTION_BOTH):
+    def enable_prbs_mode(self, target, mode_value, lane_mask, direction):
         """
         This API configures and enables the PRBS mode/type depending upon the mode_value the user provides.
         The mode_value configures the PRBS Type for generation and BER sensing on a per side basis.
@@ -1157,9 +1685,32 @@ class YCableCredo(YCableBase):
 
         """
 
-        raise NotImplementedError
+        buffer = bytearray([target])
+        curr_offset = YCableCredo.OFFSET_TARGET
 
-    def disable_prbs_mode(self, target, direction=PRBS_DIRECTION_BOTH):
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+            if result is False:
+                return result
+            buffer = bytearray([mode_value])
+            curr_offset = YCableCredo.OFFSET_CONFIGURE_PRBS_TYPE
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+            if result is False:
+                return result
+            buffer = bytearray([lane_map])
+            curr_offset = YCableCredo.OFFSET_ENABLE_PRBS
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to configure the PRBS type")
+            return -1
+
+        return result
+
+    def disable_prbs_mode(self, target, direction):
         """
         This API disables the PRBS mode on the physical port.
         The port on which this API is called for can be referred using self.port.
@@ -1182,9 +1733,26 @@ class YCableCredo(YCableBase):
                      , False if the disable failed
         """
 
-        raise NotImplementedError
+        buffer = bytearray([target])
+        curr_offset = YCableCredo.OFFSET_TARGET
 
-    def enable_loopback_mode(self, target, mode=NEAR_END_LOOPBACK, lane_mask):
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+            if result is False:
+                return result
+            buffer = bytearray([0])
+            curr_offset = YCableCredo.OFFSET_ENABLE_PRBS
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to configure the PRBS type")
+            return -1
+
+        return result
+
+    def enable_loopback_mode(self, target, mode, lane_mask):
         """
         This API configures and enables the Loopback mode on the port user provides.
         Target is an integer for selecting which end of the Y cable we want to run loopback on.
@@ -1213,7 +1781,24 @@ class YCableCredo(YCableBase):
                      , False if the enable failed
         """
 
-        raise NotImplementedError
+        buffer = bytearray([target])
+        curr_offset = YCableCredo.OFFSET_TARGET
+
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+            if result is False:
+                return result
+            buffer = bytearray([lane_map])
+            curr_offset = YCableCredo.OFFSET_ENABLE_LOOPBACK
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to configure the PRBS type")
+            return -1
+
+        return result
 
     def disable_loopback_mode(self, target):
         """
@@ -1233,8 +1818,24 @@ class YCableCredo(YCableBase):
             a boolean, True if the disable is successful
                      , False if the disable failed
         """
+        buffer = bytearray([target])
+        curr_offset = YCableCredo.OFFSET_TARGET
 
-        raise NotImplementedError
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+            if result is False:
+                return result
+            buffer = bytearray([0])
+            curr_offset = YCableCredo.OFFSET_ENABLE_LOOPBACK
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to configure the PRBS type")
+            return -1
+
+        return result
 
     def get_loopback_mode(self, target):
         """
@@ -1276,8 +1877,45 @@ class YCableCredo(YCableBase):
             a list, with BER values of lane 0 lane 1 lane 2 lane 3 with corresponding index
         """
 
-        raise NotImplementedError
+        buffer = bytearray([target])
+        curr_offset = YCableCredo.OFFSET_TARGET
 
+        ber_result = []
+
+        if self.platform_chassis is not None:
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+            if result is False:
+                return result
+            buffer = bytearray([0])
+            curr_offset = YCableCredo.OFFSET_INITIATE_BER_MEASUREMENT
+            result = self.platform_chassis.get_sfp(
+                self.port).write_eeprom(curr_offset, 1, buffer)
+            if result is False:
+                return result
+            time_start = time.time()
+            while(True):
+                done = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
+                time_now = time.time()
+                time_diff = time_now - time_start
+                if done[0] == 1:
+                    break
+                elif time_diff >= YCableCredo.BER_TIMEOUT_SECS:
+                    return YCableCredo.EEPROM_TIMEOUT_ERROR
+
+            idx = 0
+            curr_offset = YCableCredo.OFFSET_LANE_1_BER_RESULT
+            for lane in range(YCableCredo.MAX_NUM_LANES):
+                msb_result  = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset+idx, 1)
+                lsb_result  = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset+1+idx, 1)
+                lane_result = msb_result[0] * math.pow(10, (lsb_result[0]-24))
+                ber_result.append(lane_result)
+                idx += 2
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to configure the PRBS type")
+            return -1
+
+        return ber_result
 
     def debug_dump_registers(self):
         """

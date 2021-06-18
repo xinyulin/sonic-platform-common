@@ -3,7 +3,8 @@
 
     Implementation of Credo Y-Cable
 """
-
+import os
+import sys
 import math
 import time
 import struct
@@ -28,6 +29,8 @@ class YCableCredo(YCableBase):
     OFFSET_SWITCH_MUX_DIRECTION      = 642
     OFFSET_MUX_DIRECTION             = 644
     OFFSET_ACTIVE_TOR_INDICATOR      = 645
+    OFFSET_ENABLE_AUTO_SWITCH        = 651
+    OFFSET_AUTO_SWITCH_HYSTERESIS    = 652
     OFFSET_MANUAL_SWITCH_COUNT       = 653
     OFFSET_AUTO_SWITCH_COUNT         = 657
     OFFSET_NIC_CURSOR_VALUES         = 661
@@ -78,6 +81,7 @@ class YCableCredo(YCableBase):
     VSC_BLOCK_WRITE_LENGTH           = 32
 
     FIRMWARE_INFO_PAYLOAD_SIZE       = 48
+    EVENTLOG_PAYLOAD_SIZE            = 18
 
     MAX_NUM_LANES                    = 4
 
@@ -822,8 +826,19 @@ class YCableCredo(YCableBase):
             a boolean, True if cursor values setting is successful
                      , False if cursor values setting is not successful
         """
+        curr_offset = YCableCredo.OFFSET_NIC_CURSOR_VALUES
+        idx = 0
+        if self.platform_chassis is not None:
+            for data in cursor_values:
+                data = data & 0xFF
+                buffer = bytearray([data])
+                self.platform_chassis.get_sfp(self.port).write_eeprom(curr_offset + (target)*20 + (lane-1)*5 + idx, 1, buffer)
+                idx+=1
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get target cursor values")
+            return -1
 
-        raise NotImplementedError
+        return True
 
     def get_firmware_version(self, target):
         """
@@ -935,7 +950,7 @@ class YCableCredo(YCableBase):
         vsc_req_form[YCableCredo.VSC_BYTE_OPCODE] = YCableCredo.VSC_OPCODE_FWUPD
         vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_START
         status = self.send_vsc_cmd(vsc_req_form)
-        if status != MCU_EC_NO_ERROR:
+        if status != YCableCredo.MCU_EC_NO_ERROR:
             self.helper_logger.log_error(YCableCredo.MCU_ERROR_CODE_STRING[status])
             return YCableBase.FIRMWARE_DOWNLOAD_FAILURE
 
@@ -951,10 +966,10 @@ class YCableCredo(YCableBase):
             for byte_offset in range(YCableCredo.VSC_BUFF_SIZE):
                 checksum += fwImage[fw_img_offset]
                 fw_img_offset += 1
-                if (((byte_offset + 1) % YCableCredo.VSC_BLOCK_WRITE_LENGTH) == 0):
-                    page = MIS_PAGE_FC + byte_offset // 128
-                    byte = 128 + ((byte_offset + 1) - YCableCredo.VSC_BLOCK_WRITE_LENGTH) % 128
-                    self.write_mmap(page, byte, bytearray(fwImage[fw_img_offset - VSC_BLOCK_WRITE_LENGTH: fw_img_offset]), VSC_BLOCK_WRITE_LENGTH)
+                if (((byte_offset + 1) % YCableCredo.BLOCK_WRITE_LENGTH) == 0):
+                    page = YCableCredo.MIS_PAGE_FC + byte_offset // 128
+                    byte = 128 + ((byte_offset + 1) - YCableCredo.BLOCK_WRITE_LENGTH) % 128
+                    self.write_mmap(page, byte, bytearray(fwImage[fw_img_offset - YCableCredo.BLOCK_WRITE_LENGTH: fw_img_offset]), YCableCredo.BLOCK_WRITE_LENGTH)
 
             fw_img_offset = chunk_idx * YCableCredo.VSC_BUFF_SIZE
             vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
@@ -975,7 +990,7 @@ class YCableCredo(YCableBase):
                 chunk_idx += 1
                 retry_count = 0
             else:
-                print ('MCU Checksum error[%04X], resend firmware payload [%04X: %04X]' % (status, chunk_idx * VSC_BUFF_SIZE, (chunk_idx + 1) * VSC_BUFF_SIZE))
+                print ('MCU Checksum error[%04X], resend firmware payload [%04X: %04X]' % (status, chunk_idx * YCableCredo.VSC_BUFF_SIZE, (chunk_idx + 1) * YCableCredo.VSC_BUFF_SIZE))
 
                 if retry_count == 3:
                     self.helper_logger.log_error ('Retry Xfer Fw Bin Error, abort firmware update')
@@ -990,7 +1005,7 @@ class YCableCredo(YCableBase):
         vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_LOCAL_XFER_COMPLETE
         status = self.send_vsc_cmd(vsc_req_form)
         if status != YCableCredo.MCU_EC_NO_ERROR:
-            helper_logger.log_error(YCableCredo.MCU_ERROR_CODE_STRING[status])
+            self.helper_logger.log_error(YCableCredo.MCU_ERROR_CODE_STRING[status])
             return YCableBase.FIRMWARE_DOWNLOAD_FAILURE
 
         '''
@@ -1316,8 +1331,8 @@ class YCableCredo(YCableBase):
 
         raise NotImplementedError
 
-    def create_port(self, speed, fec_mode_tor_a=0, fec_mode_tor_b=0,
-                    fec_mode_nic=0, anlt_tor_a=False, anlt_tor_b= False, anlt_nic=False):
+    def create_port(self, speed, fec_mode_tor_a=YCableBase.FEC_MODE_NONE, fec_mode_tor_b=YCableBase.FEC_MODE_NONE,
+                    fec_mode_nic=YCableBase.FEC_MODE_NONE, anlt_tor_a=False, anlt_tor_b= False, anlt_nic=False):
         """
         This API sets the mode of the cable/port for corresponding lane/FEC etc. configuration as specified.
         The speed specifies which mode is supposed to be set 50G, 100G etc
@@ -1477,6 +1492,83 @@ class YCableCredo(YCableBase):
 
         raise NotImplementedError
 
+    def parse_eventLog(self, remainLog, data):
+        eventDes = {
+                        0x0000:'EventLog Header',
+                        0x0001:'Auto Switch',
+                        0x0002:'Manual Switch',
+                        0x0003:'BER Measurement',
+                        0x0004:'PRBS Generation',
+                        0x0005:'Loopback Mode',
+                        0x0006:'Eye Measurement',
+                        0x0007:'Epoch Time',
+                        0x0008:'Temperature',
+                        0x0009:'Voltage',
+                        0x0100:'Link Down',
+                        0x0200:'Firmware Update',
+                   }
+
+        prbsType = [[0x00, 'PRBS 9 '],
+                    [0x01, 'PRBS 15'],
+                    [0x02, 'PRBS 23'],
+                    [0x03, 'PRBS 31']]
+
+        tempType = [[0x10, 'Alarm_L'],
+                    [0x20, 'WARN_H '],
+                    [0x40, 'WARN_L '],
+                    [0x80, 'Alarm_H']]
+
+        vccType = [[0x10, 'WARN_L '],
+                   [0x20, 'WARN_H '],
+                   [0x40, 'Alarm_L'],
+                   [0x80, 'Alarm_H']]
+
+        for cnt in range(0, remainLog):
+            dataIdx  = cnt * YCableCredo.EVENTLOG_PAYLOAD_SIZE
+            uniqueID = struct.unpack_from('<H', data[dataIdx +  0 : dataIdx +  2])[0]
+            epoch    = struct.unpack_from('<I', data[dataIdx +  2 : dataIdx +  6])[0]
+            msTime   = struct.unpack_from('<H', data[dataIdx +  6 : dataIdx +  8])[0]
+            eventId  = struct.unpack_from('<H', data[dataIdx +  8 : dataIdx + 10])[0]
+            detail1  = struct.unpack_from('<I', data[dataIdx + 10 : dataIdx + 14])[0]
+            detail2  = struct.unpack_from('<I', data[dataIdx + 14 : dataIdx + 18])[0]
+
+            if epoch != 0xFFFFFFFF:
+                detail = ''
+                mode = ''
+                sys.stdout.write('%06d |' % (uniqueID))
+                sys.stdout.write(time.strftime('%Y-%m-%d %H:%M:%S.', time.gmtime(epoch)))
+                if eventId in eventDes:
+                    if eventId == 4 or eventId == 5:
+                        detail1 = str(hex(detail1))[2:].rjust(8,'0').upper()
+                        if ((detail1[0]) == '0'): mode = 'Disable'
+                        else:                     mode = 'Enable '
+                        if eventId == 4:
+                            for prbsCnt in range(len(prbsType)):
+                                if (int(detail1[1],16) == prbsType[prbsCnt][0]):
+                                    detail = prbsType[prbsCnt][1] + ' ' + '(0x' + detail1[2:8] + ')'
+                                    break;
+                    else:
+                        if eventId == 8:
+                            if (detail1 & tempType[3][0]): mode = tempType[3][1]
+                            elif (detail1 & tempType[1][0]): mode = tempType[1][1]
+                            elif (detail1 & tempType[0][0]): mode = tempType[0][1]
+                            elif (detail1 & tempType[2][0]): mode = tempType[2][1]
+                            detail2 = detail2 >> 8
+                            tempValue = -(256 - detail2) if (detail2 & 0x80) else detail2
+                        elif eventId == 9:
+                            if (detail1 & vccType[3][0]): mode = vccType[3][1]
+                            elif (detail1 & vccType[1][0]): mode = vccType[1][1]
+                            elif (detail1 & vccType[2][0]): mode = vccType[2][1]
+                            elif (detail1 & vccType[0][0]): mode = vccType[0][1]
+                        detail = '0x' + hex(detail1)[2:].rjust(8,'0').upper()
+
+                    if eventId == 8: print ('%03d | %15s (0x%04x) | %8s %18s | 0x%02X (%d%cC)' % (msTime, eventDes[eventId].ljust(15), eventId, mode.ljust(8), detail.ljust(18), detail2, tempValue, u'\xb0'))
+                    else:            print ('%03d | %15s (0x%04x) | %8s %18s | 0x%08X' % (msTime, eventDes[eventId].ljust(15), eventId, mode.ljust(8), detail.ljust(18), detail2))
+                else:
+                    detail = '0x' + hex(detail1)[2:].rjust(8,'0').upper()
+                    print ('%03d | %15s (0x%04x) | %8s %18s | 0x%08X' % (msTime, '', eventId, mode.ljust(8), detail.ljust(18), detail2))
+        return (uniqueID)
+
     def get_event_log(self, clear_on_read=False):
         """
         This API returns the event log of the cable
@@ -1492,7 +1584,37 @@ class YCableCredo(YCableBase):
               a list of strings which correspond to the event logs of the cable
         """
 
-        raise NotImplementedError
+        if (clear_on_read):
+            vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
+            vsc_req_form[YCableCredo.VSC_BYTE_OPCODE] = YCableCredo.VSC_OPCODE_EVENTLOG
+            vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.EVENTLOG_OPTION_CLEAR
+            status = self.send_vsc_cmd(vsc_req_form)
+
+        last_read_id = -1
+        while (True):
+            vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
+            vsc_req_form[YCableCredo.VSC_BYTE_OPCODE] = YCableCredo.VSC_OPCODE_EVENTLOG
+            vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.EVENTLOG_OPTION_DUMP
+            vsc_req_form[YCableCredo.VSC_BYTE_ADDR0]  = (last_read_id >> 0)  & 0xFF
+            vsc_req_form[YCableCredo.VSC_BYTE_ADDR1]  = (last_read_id >> 8)  & 0xFF
+            vsc_req_form[YCableCredo.VSC_BYTE_ADDR2]  = (last_read_id >> 16) & 0xFF
+            vsc_req_form[YCableCredo.VSC_BYTE_ADDR3]  = (last_read_id >> 24) & 0xFF
+            status = self.send_vsc_cmd(vsc_req_form)
+
+            if status == YCableCredo.MCU_EC_NO_ERROR:
+                fetch_cnt = self.read_mmap(YCableCredo.MIS_PAGE_VSC, 134)
+                if (fetch_cnt == 0): break
+            else:
+                self.helper_logger.log_error("send eventLog error")
+                return -1
+
+            data = bytearray(YCableCredo.EVENTLOG_PAYLOAD_SIZE * fetch_cnt)
+
+            for byteIdx in range(0, YCableCredo.EVENTLOG_PAYLOAD_SIZE * fetch_cnt):
+                readOut = self.read_mmap(YCableCredo.MIS_PAGE_FC, 128 + byteIdx)
+                data[byteIdx] = readOut
+
+            last_read_id = self.parse_eventLog(fetch_cnt, data)
 
     def get_pcs_stats(self, target):
         """
@@ -1546,8 +1668,17 @@ class YCableCredo(YCableBase):
             a boolean, True if the time is configured
                      , False if the time is not configured
         """
+        curr_offset = YCableCredo.OFFSET_AUTO_SWITCH_HYSTERESIS
 
-        raise NotImplementedError
+        buffer = bytearray([time])
+
+        if self.platform_chassis is not None:
+            self.platform_chassis.get_sfp(self.port).write_eeprom(curr_offset, 1, buffer)
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get NIC temp")
+            return -1
+
+        return True
 
     def get_autoswitch_hysteresis_timer(self):
         """
@@ -1561,8 +1692,15 @@ class YCableCredo(YCableBase):
             time:
                 an Integer, the time value for hysteresis is configured in milliseconds
         """
+        curr_offset = YCableCredo.OFFSET_AUTO_SWITCH_HYSTERESIS
 
-        raise NotImplementedError
+        if self.platform_chassis is not None:
+            time = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
+        else:
+            self.helper_logger.log_error("platform_chassis is not loaded, failed to get NIC temp")
+            return -1
+
+        return int(time[0])
 
     def restart_anlt(self):
         """
@@ -1648,7 +1786,7 @@ class YCableCredo(YCableBase):
 
         raise NotImplementedError
 
-    def enable_prbs_mode(self, target, mode_value, lane_mask, direction):
+    def enable_prbs_mode(self, target, mode_value, lane_mask, direction = YCableBase.PRBS_DIRECTION_BOTH):
         """
         This API configures and enables the PRBS mode/type depending upon the mode_value the user provides.
         The mode_value configures the PRBS Type for generation and BER sensing on a per side basis.
@@ -1697,7 +1835,7 @@ class YCableCredo(YCableBase):
                 self.port).write_eeprom(curr_offset, 1, buffer)
             if result is False:
                 return result
-            buffer = bytearray([lane_map])
+            buffer = bytearray([lane_mask])
             curr_offset = YCableCredo.OFFSET_ENABLE_PRBS
             result = self.platform_chassis.get_sfp(
                 self.port).write_eeprom(curr_offset, 1, buffer)
@@ -1750,7 +1888,7 @@ class YCableCredo(YCableBase):
 
         return result
 
-    def enable_loopback_mode(self, target, mode, lane_mask):
+    def enable_loopback_mode(self, target, lane_mask, mode = YCableBase.LOOPBACK_MODE_NEAR_END):
         """
         This API configures and enables the Loopback mode on the port user provides.
         Target is an integer for selecting which end of the Y cable we want to run loopback on.
@@ -1787,7 +1925,7 @@ class YCableCredo(YCableBase):
                 self.port).write_eeprom(curr_offset, 1, buffer)
             if result is False:
                 return result
-            buffer = bytearray([lane_map])
+            buffer = bytearray([lane_mask])
             curr_offset = YCableCredo.OFFSET_ENABLE_LOOPBACK
             result = self.platform_chassis.get_sfp(
                 self.port).write_eeprom(curr_offset, 1, buffer)

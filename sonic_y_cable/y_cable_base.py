@@ -1009,7 +1009,7 @@ class YCableBase(object):
 
         raise NotImplementedError
 
-    def enable_loopback_mode(self, target, mode=NEAR_END_LOOPBACK, lane_mask):
+    def enable_loopback_mode(self, target, lane_mask, mode=LOOPBACK_MODE_NEAR_END):
         """
         This API configures and enables the Loopback mode on the port user provides.
         Target is an integer for selecting which end of the Y cable we want to run loopback on.

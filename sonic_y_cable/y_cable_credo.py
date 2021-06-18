@@ -8,10 +8,9 @@ import math
 import time
 import struct
 from ctypes import c_int8
-from y_cable_base import YCableBase
+from sonic_y_cable.y_cable_base import YCableBase
 from sonic_py_common import logger
 import sonic_platform.platform
-
 
 class YCableCredo(YCableBase):
     # definitions of the offset with width accommodated for values
@@ -148,8 +147,6 @@ class YCableCredo(YCableBase):
         MCU_EC_UNDEFINED_ERROR                 :'Undefined Error',
     }
 
-    SYSLOG_IDENTIFIER = "sonic_y_cable"
-
     def __init__(self, port):
         """
         Args:
@@ -158,7 +155,7 @@ class YCableCredo(YCableBase):
         """
         YCableBase.__init__(self, port)
 
-        self.helper_logger = logger.Logger(YCableCredo.SYSLOG_IDENTIFIER)
+        self.helper_logger = logger.Logger("y_cable_credo_%d" % port)
         self.platform_chassis = None
 
         try:

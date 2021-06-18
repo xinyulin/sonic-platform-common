@@ -979,14 +979,11 @@ class YCableCredo(YCableBase):
             vsc_req_form[YCableCredo.VSC_BYTE_CHKSUM_LSB] = (checksum >> 0) & 0xFF
             status = self.send_vsc_cmd(vsc_req_form)
 
-            sys.stdout.write('\rI2C Xfer Offset [%06X] %d%% ' % (fw_img_offset, (100 * chunk_idx / (total_chunk - 1))))
-            sys.stdout.flush()
-
             if status == YCableCredo.MCU_EC_NO_ERROR:
                 chunk_idx += 1
                 retry_count = 0
             else:
-                print ('MCU Checksum error[%04X], resend firmware payload [%04X: %04X]' % (status, chunk_idx * YCableCredo.VSC_BUFF_SIZE, (chunk_idx + 1) * YCableCredo.VSC_BUFF_SIZE))
+                self.helper_logger.log_error ('Firmware binary transfer error (error code:%04X)' % (status))
 
                 if retry_count == 3:
                     self.helper_logger.log_error ('Retry Xfer Fw Bin Error, abort firmware update')
@@ -1001,7 +998,7 @@ class YCableCredo(YCableBase):
         vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_LOCAL_XFER_COMPLETE
         status = self.send_vsc_cmd(vsc_req_form)
         if status != YCableCredo.MCU_EC_NO_ERROR:
-            self.helper_logger.log_error(YCableCredo.MCU_ERROR_CODE_STRING[status])
+            self.helper_logger.log_error ('Veriyf firmware binary error (error code:0x%04X)' % (status))
             return YCableBase.FIRMWARE_DOWNLOAD_FAILURE
 
         '''
@@ -1012,7 +1009,7 @@ class YCableCredo(YCableBase):
         vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_UART_XFER
         status = self.send_vsc_cmd(vsc_req_form)
         if status != YCableCredo.MCU_EC_NO_ERROR:
-            self.helper_logger.log_error(YCableCredo.MCU_ERROR_CODE_STRING[status])
+            self.helper_logger.log_error ('Firmware binary UART transfer error (error code:0x%04X)' % (status))
             return YCableBase.FIRMWARE_DOWNLOAD_FAILURE
 
         vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
@@ -1020,6 +1017,7 @@ class YCableCredo(YCableBase):
         vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_UART_XFER_STATUS
         status = self.send_vsc_cmd(vsc_req_form)
         if status != YCableCredo.MCU_EC_NO_ERROR:
+            self.helper_logger.log_error ('Get firmware binary UART transfer status error (error code:0x%04X)' % (status))
             return YCableBase.FIRMWARE_DOWNLOAD_FAILURE
 
         busy        = self.read_mmap(YCableCredo.MIS_PAGE_FC, 128)
@@ -1033,17 +1031,14 @@ class YCableCredo(YCableBase):
             vsc_req_form[YCableCredo.VSC_BYTE_OPTION] = YCableCredo.FWUPD_OPTION_UART_XFER_STATUS
             status = self.send_vsc_cmd(vsc_req_form)
             if status != YCableCredo.MCU_EC_NO_ERROR:
-                print ('\nUart Error Status|%04X' % status)
-                return status
+                self.helper_logger.log_error ('Get firmware binary UART transfer status error (error code:0x%04X)' % (status))
+                return YCableBase.FIRMWARE_DOWNLOAD_FAILURE
+
             time.sleep(0.2)
             busy        = self.read_mmap(YCableCredo.MIS_PAGE_FC, 128)
             percentNIC  = self.read_mmap(YCableCredo.MIS_PAGE_FC, 129)
             percentTOR1 = self.read_mmap(YCableCredo.MIS_PAGE_FC, 130)
             percentTOR2 = self.read_mmap(YCableCredo.MIS_PAGE_FC, 131)
-
-            sys.stdout.write('\rUART Xfer: NIC [%03d%%] TOR1 [%03d%%] TOR2 [%03d%%]' % (percentNIC, percentTOR1, percentTOR2))
-            sys.stdout.flush()
-        print('')
 
         return YCableBase.FIRMWARE_DOWNLOAD_SUCCESS
 

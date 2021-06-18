@@ -3,8 +3,7 @@
 
     Implementation of Credo Y-Cable
 """
-import os
-import sys
+
 import math
 import time
 import struct
@@ -104,7 +103,7 @@ class YCableCredo(YCableBase):
     EEPROM_READ_DATA_INVALID         = -1
     EEPROM_ERROR                     = -1
     EEPROM_TIMEOUT_ERROR             = -1
-    
+
 
     # MCU error code
     MCU_EC_NO_ERROR                         = 0
@@ -628,7 +627,7 @@ class YCableCredo(YCableBase):
             result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 16)
         else:
             self.helper_logger.log_error("platform_chassis is not loaded, failed to get Vendor name")
-            return YCableCredo.EEPROM_ERROR
+            return -1
 
         vendor_name = str(result.decode())
 
@@ -650,7 +649,7 @@ class YCableCredo(YCableBase):
             part_result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 16)
         else:
             self.helper_logger.log_error("platform_chassis is not loaded, failed to get part number")
-            return YCableCredo.EEPROM_ERROR
+            return -1
 
         part_number = str(part_result.decode())
 
@@ -966,10 +965,10 @@ class YCableCredo(YCableBase):
             for byte_offset in range(YCableCredo.VSC_BUFF_SIZE):
                 checksum += fwImage[fw_img_offset]
                 fw_img_offset += 1
-                if (((byte_offset + 1) % YCableCredo.BLOCK_WRITE_LENGTH) == 0):
+                if (((byte_offset + 1) % YCableCredo.VSC_BLOCK_WRITE_LENGTH) == 0):
                     page = YCableCredo.MIS_PAGE_FC + byte_offset // 128
-                    byte = 128 + ((byte_offset + 1) - YCableCredo.BLOCK_WRITE_LENGTH) % 128
-                    self.write_mmap(page, byte, bytearray(fwImage[fw_img_offset - YCableCredo.BLOCK_WRITE_LENGTH: fw_img_offset]), YCableCredo.BLOCK_WRITE_LENGTH)
+                    byte = 128 + ((byte_offset + 1) - YCableCredo.VSC_BLOCK_WRITE_LENGTH) % 128
+                    self.write_mmap(page, byte, bytearray(fwImage[fw_img_offset - YCableCredo.VSC_BLOCK_WRITE_LENGTH: fw_img_offset]), YCableCredo.VSC_BLOCK_WRITE_LENGTH)
 
             fw_img_offset = chunk_idx * YCableCredo.VSC_BUFF_SIZE
             vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
@@ -1492,83 +1491,6 @@ class YCableCredo(YCableBase):
 
         raise NotImplementedError
 
-    def parse_eventLog(self, remainLog, data):
-        eventDes = {
-                        0x0000:'EventLog Header',
-                        0x0001:'Auto Switch',
-                        0x0002:'Manual Switch',
-                        0x0003:'BER Measurement',
-                        0x0004:'PRBS Generation',
-                        0x0005:'Loopback Mode',
-                        0x0006:'Eye Measurement',
-                        0x0007:'Epoch Time',
-                        0x0008:'Temperature',
-                        0x0009:'Voltage',
-                        0x0100:'Link Down',
-                        0x0200:'Firmware Update',
-                   }
-
-        prbsType = [[0x00, 'PRBS 9 '],
-                    [0x01, 'PRBS 15'],
-                    [0x02, 'PRBS 23'],
-                    [0x03, 'PRBS 31']]
-
-        tempType = [[0x10, 'Alarm_L'],
-                    [0x20, 'WARN_H '],
-                    [0x40, 'WARN_L '],
-                    [0x80, 'Alarm_H']]
-
-        vccType = [[0x10, 'WARN_L '],
-                   [0x20, 'WARN_H '],
-                   [0x40, 'Alarm_L'],
-                   [0x80, 'Alarm_H']]
-
-        for cnt in range(0, remainLog):
-            dataIdx  = cnt * YCableCredo.EVENTLOG_PAYLOAD_SIZE
-            uniqueID = struct.unpack_from('<H', data[dataIdx +  0 : dataIdx +  2])[0]
-            epoch    = struct.unpack_from('<I', data[dataIdx +  2 : dataIdx +  6])[0]
-            msTime   = struct.unpack_from('<H', data[dataIdx +  6 : dataIdx +  8])[0]
-            eventId  = struct.unpack_from('<H', data[dataIdx +  8 : dataIdx + 10])[0]
-            detail1  = struct.unpack_from('<I', data[dataIdx + 10 : dataIdx + 14])[0]
-            detail2  = struct.unpack_from('<I', data[dataIdx + 14 : dataIdx + 18])[0]
-
-            if epoch != 0xFFFFFFFF:
-                detail = ''
-                mode = ''
-                sys.stdout.write('%06d |' % (uniqueID))
-                sys.stdout.write(time.strftime('%Y-%m-%d %H:%M:%S.', time.gmtime(epoch)))
-                if eventId in eventDes:
-                    if eventId == 4 or eventId == 5:
-                        detail1 = str(hex(detail1))[2:].rjust(8,'0').upper()
-                        if ((detail1[0]) == '0'): mode = 'Disable'
-                        else:                     mode = 'Enable '
-                        if eventId == 4:
-                            for prbsCnt in range(len(prbsType)):
-                                if (int(detail1[1],16) == prbsType[prbsCnt][0]):
-                                    detail = prbsType[prbsCnt][1] + ' ' + '(0x' + detail1[2:8] + ')'
-                                    break;
-                    else:
-                        if eventId == 8:
-                            if (detail1 & tempType[3][0]): mode = tempType[3][1]
-                            elif (detail1 & tempType[1][0]): mode = tempType[1][1]
-                            elif (detail1 & tempType[0][0]): mode = tempType[0][1]
-                            elif (detail1 & tempType[2][0]): mode = tempType[2][1]
-                            detail2 = detail2 >> 8
-                            tempValue = -(256 - detail2) if (detail2 & 0x80) else detail2
-                        elif eventId == 9:
-                            if (detail1 & vccType[3][0]): mode = vccType[3][1]
-                            elif (detail1 & vccType[1][0]): mode = vccType[1][1]
-                            elif (detail1 & vccType[2][0]): mode = vccType[2][1]
-                            elif (detail1 & vccType[0][0]): mode = vccType[0][1]
-                        detail = '0x' + hex(detail1)[2:].rjust(8,'0').upper()
-
-                    if eventId == 8: print ('%03d | %15s (0x%04x) | %8s %18s | 0x%02X (%d%cC)' % (msTime, eventDes[eventId].ljust(15), eventId, mode.ljust(8), detail.ljust(18), detail2, tempValue, u'\xb0'))
-                    else:            print ('%03d | %15s (0x%04x) | %8s %18s | 0x%08X' % (msTime, eventDes[eventId].ljust(15), eventId, mode.ljust(8), detail.ljust(18), detail2))
-                else:
-                    detail = '0x' + hex(detail1)[2:].rjust(8,'0').upper()
-                    print ('%03d | %15s (0x%04x) | %8s %18s | 0x%08X' % (msTime, '', eventId, mode.ljust(8), detail.ljust(18), detail2))
-        return (uniqueID)
-
     def get_event_log(self, clear_on_read=False):
         """
         This API returns the event log of the cable
@@ -1591,6 +1513,23 @@ class YCableCredo(YCableBase):
             status = self.send_vsc_cmd(vsc_req_form)
 
         last_read_id = -1
+        result = []
+
+        event_type_str = {
+                        0x0000:'EventLog Header',
+                        0x0001:'Auto Switch',
+                        0x0002:'Manual Switch',
+                        0x0003:'BER Measurement',
+                        0x0004:'PRBS Generation',
+                        0x0005:'Loopback Mode',
+                        0x0006:'Eye Measurement',
+                        0x0007:'Epoch Time',
+                        0x0008:'Temperature',
+                        0x0009:'Voltage',
+                        0x0100:'Link Down',
+                        0x0200:'Firmware Update',
+                   }
+
         while (True):
             vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)
             vsc_req_form[YCableCredo.VSC_BYTE_OPCODE] = YCableCredo.VSC_OPCODE_EVENTLOG
@@ -1605,16 +1544,37 @@ class YCableCredo(YCableBase):
                 fetch_cnt = self.read_mmap(YCableCredo.MIS_PAGE_VSC, 134)
                 if (fetch_cnt == 0): break
             else:
-                self.helper_logger.log_error("send eventLog error")
-                return -1
+                self.helper_logger.log_error("download event log error(error code:%04X)" % (status))
+                return None
 
-            data = bytearray(YCableCredo.EVENTLOG_PAYLOAD_SIZE * fetch_cnt)
+            event_data = bytearray(YCableCredo.EVENTLOG_PAYLOAD_SIZE * fetch_cnt)
 
-            for byteIdx in range(0, YCableCredo.EVENTLOG_PAYLOAD_SIZE * fetch_cnt):
-                readOut = self.read_mmap(YCableCredo.MIS_PAGE_FC, 128 + byteIdx)
-                data[byteIdx] = readOut
+            for byte_offset in range(0, YCableCredo.EVENTLOG_PAYLOAD_SIZE * fetch_cnt):
+                byte_data = self.read_mmap(YCableCredo.MIS_PAGE_FC, 128 + byte_offset)
+                event_data[byte_offset] = byte_data
 
-            last_read_id = self.parse_eventLog(fetch_cnt, data)
+            for curr_idx in range(0, fetch_cnt):
+                byte_offset = curr_idx * YCableCredo.EVENTLOG_PAYLOAD_SIZE
+                event_id    = struct.unpack_from('<H', event_data[byte_offset +  0 : byte_offset +  2])[0]
+                epoch       = struct.unpack_from('<I', event_data[byte_offset +  2 : byte_offset +  6])[0]
+                epoch_ms    = struct.unpack_from('<H', event_data[byte_offset +  6 : byte_offset +  8])[0]
+                event_type  = struct.unpack_from('<H', event_data[byte_offset +  8 : byte_offset + 10])[0]
+                detail1     = struct.unpack_from('<I', event_data[byte_offset + 10 : byte_offset + 14])[0]
+                detail2     = struct.unpack_from('<I', event_data[byte_offset + 14 : byte_offset + 18])[0]
+
+                if epoch != 0xFFFFFFFF:
+                    entry = {}
+
+                    entry['EventId']   = event_id
+                    entry['Timestamp'] = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(epoch)) + '.%03d' % (epoch_ms)
+                    entry['EventType'] = event_type_str[event_type]
+                    entry['Detail1']   = detail1
+                    entry['Detail2']   = detail2
+
+                    result.append(entry)
+
+                    last_read_id = event_id
+        return result
 
     def get_pcs_stats(self, target):
         """

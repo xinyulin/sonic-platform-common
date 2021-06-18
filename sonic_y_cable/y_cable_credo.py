@@ -74,10 +74,8 @@ class YCableCredo(YCableBase):
 
     # upper page 0xFA VSC command attribute length
     VSC_CMD_ATTRIBUTE_LENGTH         = 141
-
     VSC_BUFF_SIZE                    = 512
-
-    BLOCK_WRITE_LENGTH               = 32
+    VSC_BLOCK_WRITE_LENGTH           = 32
 
     FIRMWARE_INFO_PAYLOAD_SIZE       = 48
 
@@ -97,6 +95,12 @@ class YCableCredo(YCableBase):
     BER_TIMEOUT_SECS                 = 1
     EYE_TIMEOUT_SECS                 = 1
 
+
+    # error code of EEPROM
+    EEPROM_READ_DATA_INVALID         = -1
+    EEPROM_ERROR                     = -1
+    EEPROM_TIMEOUT_ERROR             = -1
+    
 
     # MCU error code
     MCU_EC_NO_ERROR                         = 0
@@ -377,8 +381,7 @@ class YCableCredo(YCableBase):
             self.helper_logger.log_info("Reading from NIC side")
             return YCableBase.TARGET_NIC
         else:
-            self.helper_logger.log_error(
-                "Error: unknown status for checking which side regval = {} ".format(result))
+            self.helper_logger.log_error("Error: unknown status for checking which side regval = {} ".format(result))
 
         return YCableBase.TARGET_UNKNOWN
 
@@ -430,8 +433,7 @@ class YCableCredo(YCableBase):
             self.helper_logger.log_info("mux pointing to TOR B")
             return YCableBase.TARGET_TOR_B
         else:
-            self.helper_logger.log_error(
-                "Error: unknown status for mux direction regval = {} ".format(result))
+            self.helper_logger.log_error("Error: unknown status for mux direction regval = {} ".format(result))
             return YCableBase.TARGET_UNKNOWN
 
         return YCableBase.TARGET_UNKNOWN
@@ -456,8 +458,7 @@ class YCableCredo(YCableBase):
         curr_offset = YCableCredo.OFFSET_ACTIVE_TOR_INDICATOR
 
         if self.platform_chassis is not None:
-            result = self.platform_chassis.get_sfp(
-                self.port).read_eeprom(curr_offset, 1)
+            result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
         else:
             self.helper_logger.log_error("platform_chassis is not loaded, failed to check Active Linked and routing TOR side")
             return YCableBase.TARGET_UNKNOWN
@@ -489,8 +490,7 @@ class YCableCredo(YCableBase):
             self.helper_logger.log_info("Nothing linked for routing")
             return YCableBase.TARGET_NIC
         else:
-            self.helper_logger.log_error(
-                "Error: unknown status for active TOR regval = {} ".format(result))
+            self.helper_logger.log_error("Error: unknown status for active TOR regval = {} ".format(result))
             return YCableBase.TARGET_UNKNOWN
 
         return YCableBase.TARGET_UNKNOWN
@@ -515,8 +515,7 @@ class YCableCredo(YCableBase):
         curr_offset = YCableCredo.OFFSET_CHECK_LINK_ACTIVE
 
         if self.platform_chassis is not None:
-            result = self.platform_chassis.get_sfp(
-                self.port).read_eeprom(curr_offset, 1)
+            result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 1)
         else:
             self.helper_logger.log_error("platform_chassis is not loaded, failed to check if link is Active on target side")
             return YCableBase.TARGET_UNKNOWN
@@ -567,20 +566,18 @@ class YCableCredo(YCableBase):
             a list, with EYE values of lane 0 lane 1 lane 2 lane 3 with corresponding index
         """
 
-        buffer = bytearray([target])
-        curr_offset = YCableCredo.OFFSET_TARGET
-
-        eye_result = []
+        eye_result  = []
 
         if self.platform_chassis is not None:
-            result = self.platform_chassis.get_sfp(
-                self.port).write_eeprom(curr_offset, 1, buffer)
+            buffer      = bytearray([target])
+            curr_offset = YCableCredo.OFFSET_TARGET
+            result = self.platform_chassis.get_sfp(self.port).write_eeprom(curr_offset, 1, buffer)
             if result is False:
                 return result
+
             buffer = bytearray([0])
             curr_offset = YCableCredo.OFFSET_INITIATE_EYE_MEASUREMENT
-            result = self.platform_chassis.get_sfp(
-                self.port).write_eeprom(curr_offset, 1, buffer)
+            result = self.platform_chassis.get_sfp(self.port).write_eeprom(curr_offset, 1, buffer)
             if result is False:
                 return result
 
@@ -598,8 +595,8 @@ class YCableCredo(YCableBase):
             idx = 0
             for lane in range(YCableCredo.MAX_NUM_LANES):
                 curr_offset = YCableCredo.OFFSET_LANE_1_EYE_RESULT
-                msb_result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset+idx, 1)
-                lsb_result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset+1+idx, 1)
+                msb_result  = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset + idx, 1)
+                lsb_result  = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset + idx + 1, 1)
 
                 lane_result = (msb_result[0] << 8 | lsb_result[0])
                 eye_result.append(lane_result)
@@ -620,13 +617,14 @@ class YCableCredo(YCableBase):
         Returns:
             a string, with vendor name
         """
+
         curr_offset = YCableCredo.OFFSET_VENDOR_NAME
 
         if self.platform_chassis is not None:
             result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 16)
         else:
             self.helper_logger.log_error("platform_chassis is not loaded, failed to get Vendor name")
-            return -1
+            return YCableCredo.EEPROM_ERROR
 
         vendor_name = str(result.decode())
 
@@ -648,7 +646,7 @@ class YCableCredo(YCableBase):
             part_result = self.platform_chassis.get_sfp(self.port).read_eeprom(curr_offset, 16)
         else:
             self.helper_logger.log_error("platform_chassis is not loaded, failed to get part number")
-            return -1
+            return YCableCredo.EEPROM_ERROR
 
         part_number = str(part_result.decode())
 
@@ -953,10 +951,10 @@ class YCableCredo(YCableBase):
             for byte_offset in range(YCableCredo.VSC_BUFF_SIZE):
                 checksum += fwImage[fw_img_offset]
                 fw_img_offset += 1
-                if (((byte_offset + 1) % YCableCredo.BLOCK_WRITE_LENGTH) == 0):
+                if (((byte_offset + 1) % YCableCredo.VSC_BLOCK_WRITE_LENGTH) == 0):
                     page = MIS_PAGE_FC + byte_offset // 128
-                    byte = 128 + ((byte_offset + 1) - YCableCredo.BLOCK_WRITE_LENGTH) % 128
-                    self.write_mmap(page, byte, bytearray(fwImage[fw_img_offset - BLOCK_WRITE_LENGTH: fw_img_offset]), BLOCK_WRITE_LENGTH)
+                    byte = 128 + ((byte_offset + 1) - YCableCredo.VSC_BLOCK_WRITE_LENGTH) % 128
+                    self.write_mmap(page, byte, bytearray(fwImage[fw_img_offset - VSC_BLOCK_WRITE_LENGTH: fw_img_offset]), VSC_BLOCK_WRITE_LENGTH)
 
             fw_img_offset = chunk_idx * YCableCredo.VSC_BUFF_SIZE
             vsc_req_form = [None] * (YCableCredo.VSC_CMD_ATTRIBUTE_LENGTH)

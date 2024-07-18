@@ -1237,7 +1237,7 @@ class CmisApi(XcvrApi):
         writelength = (writelength_raw + 1) * 8
         txt += 'Auto page support: %s\n' %autopaging_flag
         txt += 'Max write length: %d\n' %writelength
-        rpllen, rpl_chkcode, rpl = self.cdb.get_fw_management_features()
+        rpllen, rpl_chkcode, rpl = self.cdb.get_fw_management_features()['rpl']
         if self.cdb.cdb_chkcode(rpl) == rpl_chkcode:
             startLPLsize = rpl[2]
             txt += 'Start payload size %d\n' % startLPLsize
@@ -1282,7 +1282,7 @@ class CmisApi(XcvrApi):
             return {'status': False, 'info': "CDB Not supported", 'result': None}
 
         # get fw info (CMD 0100h)
-        rpllen, rpl_chkcode, rpl = self.cdb.get_fw_info()
+        rpllen, rpl_chkcode, rpl = self.cdb.get_fw_info()['rpl']
         # Interface NACK or timeout
         if (rpllen is None) or (rpl_chkcode is None):
             return {'status': False, 'info': "Interface fail", 'result': 0} # Return result 0 for distinguishing CDB is maybe in busy or failure.
@@ -1293,7 +1293,7 @@ class CmisApi(XcvrApi):
             logger.info(string)
             # Reset password for module using CMIS 4.0
             self.cdb.module_enter_password(0)
-            rpllen, rpl_chkcode, rpl = self.cdb.get_fw_info()
+            rpllen, rpl_chkcode, rpl = self.cdb.get_fw_info()['rpl']
 
         if self.cdb.cdb_chkcode(rpl) == rpl_chkcode:
             # Regiter 9Fh:136

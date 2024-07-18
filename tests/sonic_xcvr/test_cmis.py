@@ -1158,14 +1158,22 @@ class TestCmis(object):
         assert result == expected
 
     @pytest.mark.parametrize("mock_response, expected", [
-        ((128, 1, [0] * 128),  {'status': True, 'info': "", 'result': 0}),
-        ((None, 1, [0] * 128),  {'status': False, 'info': "", 'result': 0}),
-        ((128, None, [0] * 128),  {'status': False, 'info': "", 'result': 0}),
-        ((128, 0, [0] * 128),  {'status': False, 'info': "", 'result': None}),
-        ((128, 1, [67, 3, 2, 2, 3, 183] + [0] * 104),  {'status': True, 'info': "", 'result': None}),
-        ((128, 1, [52, 3, 2, 2, 3, 183] + [0] * 104),  {'status': True, 'info': "", 'result': None}),
-        ((110, 1, [3, 3, 2, 2, 3, 183] + [0] * 104),  {'status': True, 'info': "", 'result': None}),
-        ((110, 1, [48, 3, 2, 2, 3, 183] + [0] * 104),  {'status': True, 'info': "", 'result': None}),
+        ({'status':1, 'rpl':(128, 1, [0] * 128)},
+         {'status': True, 'info': "", 'result': 0}),
+        ({'status':1, 'rpl':(None, 1, [0] * 128)},
+         {'status': False, 'info': "", 'result': 0}),
+        ({'status':1, 'rpl':(128, None, [0] * 128)},
+         {'status': False, 'info': "", 'result': 0}),
+        ({'status':1, 'rpl':(128, 0, [0] * 128)},
+         {'status': False, 'info': "", 'result': None}),
+        ({'status':1, 'rpl':(128, 1, [67, 3, 2, 2, 3, 183] + [0] * 104)},
+         {'status': True, 'info': "", 'result': None}),
+        ({'status':1, 'rpl':(128, 1, [52, 3, 2, 2, 3, 183] + [0] * 104)},
+         {'status': True, 'info': "", 'result': None}),
+        ({'status':1, 'rpl':(110, 1, [3, 3, 2, 2, 3, 183] + [0] * 104)},
+         {'status': True, 'info': "", 'result': None}),
+        ({'status':1, 'rpl':(110, 1, [48, 3, 2, 2, 3, 183] + [0] * 104)},
+         {'status': True, 'info': "", 'result': None}),
     ])
     def test_get_module_fw_info(self, mock_response, expected):
         self.api.cdb = MagicMock()
@@ -1178,7 +1186,8 @@ class TestCmis(object):
         self.api.cdb.get_fw_info = MagicMock()
         self.api.cdb.get_fw_info.return_value = mock_response
         result = self.api.get_module_fw_info()
-        if result['status'] == False: # Check 'result' when 'status' == False for distinguishing error type.
+        if result['status'] is False: # Check 'result' when 'status' == False
+                                      # for distinguishing error type.
             assert result['result'] == expected['result']
         assert result['status'] == expected['status']
 
